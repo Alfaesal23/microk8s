@@ -12,6 +12,8 @@ from common.utils import (
     exit_if_no_permission,
     is_cluster_locked,
     is_ha_enabled,
+    snap_data,
+    safe_extract,
 )
 
 
@@ -19,8 +21,7 @@ def get_kine_endpoint():
     """
     Return the default kine endpoint
     """
-    kine_socket = "unix:///var/snap/microk8s/current/var/kubernetes/backend/kine.sock:12379"
-    return kine_socket
+    return "unix://{}/var/kubernetes/backend/kine.sock:12379".format(snap_data())
 
 
 def kine_exists():
@@ -67,8 +68,6 @@ def backup(fname=None, debug=False):
     """
     snap_path = os.environ.get("SNAP")
     kine_ep = get_kine_endpoint()
-    # snap_path = '/snap/microk8s/current'
-    # snapdata_path = '/var/snap/microk8s/current'
 
     if not fname:
         fname = generate_backup_name()
@@ -77,8 +76,10 @@ def backup(fname=None, debug=False):
     fname_tar = "{}.tar.gz".format(fname)
 
     with tempfile.TemporaryDirectory() as tmpdirname:
-        backup_cmd = "{}/bin/migrator --endpoint {} --mode backup-dqlite --db-dir {}".format(
-            snap_path, kine_ep, "{}/{}".format(tmpdirname, fname)
+        backup_cmd = (
+            "{}/bin/k8s-dqlite migrator --endpoint {} --mode backup-dqlite --db-dir {}".format(
+                snap_path, kine_ep, "{}/{}".format(tmpdirname, fname)
+            )
         )
         if debug:
             backup_cmd = "{} {}".format(backup_cmd, "--debug")
@@ -107,17 +108,18 @@ def restore(fname_tar, debug=False):
     """
     snap_path = os.environ.get("SNAP")
     kine_ep = get_kine_endpoint()
-    # snap_path = '/snap/microk8s/current'
     with tempfile.TemporaryDirectory() as tmpdirname:
         with tarfile.open(fname_tar, "r:gz") as tar:
-            tar.extractall(path=tmpdirname)
+            safe_extract(tar, path=tmpdirname)
         if fname_tar.endswith(".tar.gz"):
             fname = fname_tar[:-7]
         else:
             fname = fname_tar
         fname = os.path.basename(fname)
-        restore_cmd = "{}/bin/migrator --endpoint {} --mode restore-to-dqlite --db-dir {}".format(
-            snap_path, kine_ep, "{}/{}".format(tmpdirname, fname)
+        restore_cmd = (
+            "{}/bin/k8s-dqlite migrator --endpoint {} --mode restore-to-dqlite --db-dir {}".format(
+                snap_path, kine_ep, "{}/{}".format(tmpdirname, fname)
+            )
         )
         if debug:
             restore_cmd = "{} {}".format(restore_cmd, "--debug")

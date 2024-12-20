@@ -1,15 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -eu
+source $SNAP/actions/common/utils.sh
 
-export PATH="$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
-ARCH="$($SNAP/bin/uname -m)"
-export LD_LIBRARY_PATH="$SNAP/lib:$SNAP/usr/lib:$SNAP/lib/$ARCH-linux-gnu:$SNAP/usr/lib/$ARCH-linux-gnu"
+use_snap_env
 
-if [ ! -f "${SNAP_DATA}/bin/helm" ]; then
-  echo "Helm not available, try enabling it with 'microk8s enable helm'" >&2
+if [ -e ${SNAP_DATA}/var/lock/clustered.lock ]
+then
+  echo "This MicroK8s deployment is acting as a node in a cluster. Please use the microk8s helm on the master."
   exit 0
 fi
 
-source $SNAP/actions/common/utils.sh
-"${SNAP_DATA}/bin/helm" --kubeconfig="${SNAP_DATA}"/credentials/client.config "$@"
+exit_if_stopped
+
+"${SNAP}/bin/helm" --kubeconfig="${SNAP_DATA}"/credentials/client.config "$@"

@@ -15,15 +15,15 @@ devices:
     path: /sys/module/nf_conntrack/parameters/hashsize
     source: /sys/module/nf_conntrack/parameters/hashsize
     type: disk
-  aadisable1:
-    path: /sys/module/apparmor/parameters/enabled
-    source: /dev/null
-    type: disk
   aadisable2:
     path: /dev/kmsg
     source: /dev/kmsg
-    type: disk
+    type: unix-char
   aadisable3:
     path: /sys/fs/bpf
     source: /sys/fs/bpf
+    type: disk
+  aadisable4:
+    path: /proc/sys/net/netfilter/nf_conntrack_max
+    source: /proc/sys/net/netfilter/nf_conntrack_max
     type: disk

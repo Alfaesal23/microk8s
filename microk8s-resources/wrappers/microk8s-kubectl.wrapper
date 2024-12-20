@@ -1,9 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -eu
 
-export PATH="$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
 source $SNAP/actions/common/utils.sh
+
+use_snap_env
 
 if [ -e ${SNAP_DATA}/var/lock/clustered.lock ]
 then
@@ -20,6 +21,11 @@ fi
 if [ -e $SNAP_DATA/args/kubectl-env ]
 then
   source $SNAP_DATA/args/kubectl-env
+fi
+
+if is_strict
+then
+  export EDITOR="${SNAP}/bin/nano"
 fi
 
 declare -a args="($(cat $SNAP_DATA/args/kubectl))"

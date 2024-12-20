@@ -4,33 +4,94 @@ set -eux
 
 source $SNAP/actions/common/utils.sh
 
+use_snap_env
+
+# Make sure either the install hook has run or we are refreshing an already existing snap as indicated
+# by the existence of certificates.
+if [ ! -f "${SNAP_DATA}/var/lock/installed.lock" ] && [ ! -f ${SNAP_DATA}/certs/csr.conf.template ]
+then
+  exit 0
+fi
+
+if is_strict
+then
+  echo "Checking snap interfaces..."
+
+  check_snap_interfaces # Check for interfaces but do not start until this script has run.
+else
+  # In classic we do not make use of the status flag. Here we clean any "blocked" message that may have
+  # come from a failed strict deployment
+  snapctl set-health okay
+fi
+
 need_api_restart=false
+need_cluster_agent_restart=false
 need_proxy_restart=false
 need_kubelet_restart=false
 need_controller_restart=false
 need_scheduler_restart=false
 
-# This is a one-off patch. It will allow us to refresh the beta snap without breaking the user's deployment.
-# We make sure the certificates used by the deployment from beta do not change. We copy them to SNAP_DATA
-# and make sure the respective services use them.
-# Without this patch the user would have to remove and reainstall microk8s.
-# This patch can be removed at a later stage.
-if [ ! -d ${SNAP_DATA}/certs ] && grep -e "\-\-client-ca-file=\${SNAP}/certs/ca.crt" ${SNAP_DATA}/args/kube-apiserver
+# Try to symlink /var/lib/kubelet so that most kubelet device plugins work out of the box.
+if ! [ -e /var/lib/kubelet ] && ln -s $SNAP_COMMON/var/lib/kubelet /var/lib/kubelet; then
+  echo "/var/lib/kubelet linked to $SNAP_COMMON"
+fi
+
+SNAP_DATA_CURRENT=`echo "${SNAP_DATA}" | sed -e "s,${SNAP_REVISION},current,"`
+
+# Try to symlink /var/lib/calico so that the Calico CNI plugin picks up the mtu configuration.
+if ! [ -e /var/lib/calico ]; then
+  if ln -s $SNAP_DATA_CURRENT/var/lib/calico /var/lib/calico; then
+    echo "/var/lib/calico linked to $SNAP_DATA_CURRENT/var/lib/calico"
+  fi
+fi
+
+# Try to symlink standard CNI Kubernetes directories.
+if ! [ -e /etc/cni/net.d ]; then
+  if mkdir -p /etc/cni && ln -s $SNAP_DATA_CURRENT/args/cni-network /etc/cni/net.d; then
+    echo "/etc/cni/net.d linked to $SNAP_DATA_CURRENT/args/cni-network"
+  fi
+fi
+if ! [ -e /opt/cni/bin ]; then
+  if mkdir -p /opt/cni && ln -s $SNAP_DATA_CURRENT/opt/cni/bin /opt/cni/bin; then
+    echo "/opt/cni/bin linked to $SNAP_DATA_CURRENT/opt/cni/bin"
+  fi
+fi
+
+# If the configurations directory is missing from SNAP_COMMON, we are upgrading from an older MicroK8s version.
+if [ ! -d "${SNAP_COMMON}/etc/launcher" ]
 then
-  echo "Patching certificates location"
-  mkdir -p ${SNAP_DATA}/certs
-  cp -r ${SNAP}/certs-beta/* ${SNAP_DATA}/certs/
-  "$SNAP/bin/sed" -i 's@\${SNAP}/certs/ca.crt@\${SNAP_DATA}/certs/ca.crt@g' ${SNAP_DATA}/args/kube-apiserver
-  "$SNAP/bin/sed" -i 's@\${SNAP}/certs/server.key@\${SNAP_DATA}/certs/server.key@g' ${SNAP_DATA}/args/kube-apiserver
-  "$SNAP/bin/sed" -i 's@\${SNAP}/certs/server.crt@\${SNAP_DATA}/certs/server.crt@g' ${SNAP_DATA}/args/kube-apiserver
-  "$SNAP/bin/sed" -i 's@\${SNAP}/certs/serviceaccount.key@\${SNAP_DATA}/certs/serviceaccount.key@g' ${SNAP_DATA}/args/kube-apiserver
-  "$SNAP/bin/sed" -i 's@\${SNAP}/certs/ca.crt@\${SNAP_DATA}/certs/ca.crt@g' ${SNAP_DATA}/args/kube-controller-manager
-  "$SNAP/bin/sed" -i 's@\${SNAP}/certs/serviceaccount.key@\${SNAP_DATA}/certs/serviceaccount.key@g' ${SNAP_DATA}/args/kube-controller-manager
-  need_api_restart=true
-  need_controller_restart=true
+  mkdir -p "${SNAP_COMMON}/etc/launcher"
+fi
+
+# snap set microk8s config="$(cat config.yaml)"
+config="$(snapctl get config || true)"
+if [ ! -z "${config}" ]
+then
+  # Only write config file if not already applied.
+  applied_config="$(cat ${SNAP_COMMON}/etc/launcher/snap-set.yaml.applied || true)"
+  if [ -z "${applied_config}" ] || [ "${config}" != "${applied_config}" ]
+  then
+    echo "${config}" > "${SNAP_COMMON}/etc/launcher/snap-set.yaml"
+  fi
+fi
+
+# If the addons directory is missing from SNAP_COMMON, then we are upgrading from an older MicroK8s version.
+if [ ! -d "${SNAP_COMMON}/addons" ]
+then
+  mkdir -p ${SNAP_COMMON}/addons
+  snap_current=`echo "${SNAP}" | sed -e "s,${SNAP_REVISION},current,"`
+  for addon in $(cat "${SNAP}/addons/.auto-add"); do
+    "${SNAP}/git.wrapper" clone "${snap_current}/addons/${addon}" "${SNAP_COMMON}/addons/${addon}"
+  done
+fi
+
+if [ ! -d "${SNAP_COMMON}/plugins" ]
+then
+  mkdir -p ${SNAP_COMMON}/plugins
 fi
 
 #Allow the ability to add external IPs to the csr, by moving the csr.conf.template to SNAP_DATA
+# TODO(neoaggelos): investigate if this is needed
 if [ ! -f ${SNAP_DATA}/certs/csr.conf.template ]
 then
    cp ${SNAP}/certs/csr.conf.template ${SNAP_DATA}/certs/csr.conf.template
@@ -60,13 +121,13 @@ then
   need_api_restart=true
 fi
 
-# Patch for issue: https://github.com/ubuntu/microk8s/issues/121
+# Patch for issue: https://github.com/canonical/microk8s/issues/121
 if grep -e  "requestheader-client-ca-file=/var/snap/microk8s/.../certs/ca.crt"  ${SNAP_DATA}/args/kube-apiserver
 then
   "$SNAP/bin/sed" -i 's@requestheader-client-ca-file=/var/snap/microk8s/.../certs/ca.crt@requestheader-client-ca-file=\${SNAP_DATA}/certs/ca.crt@g' ${SNAP_DATA}/args/kube-apiserver
 fi
 
-# Patch for issue: https://github.com/ubuntu/microk8s/issues/721
+# Patch for issue: https://github.com/canonical/microk8s/issues/721
 if grep -F 'requestheader-client-ca-file=${SNAP_DATA}/certs/ca.crt' ${SNAP_DATA}/args/kube-apiserver
 then
   "$SNAP/bin/sed" -i 's@requestheader-client-ca-file=${SNAP_DATA}/certs/ca.crt@requestheader-client-ca-file=${SNAP_DATA}/certs/front-proxy-ca.crt@g' ${SNAP_DATA}/args/kube-apiserver
@@ -75,13 +136,17 @@ fi
 # Create the locks directory
 mkdir -p ${SNAP_DATA}/var/lock/
 
+# Create tmp directory
+mkdir -p ${SNAP_DATA}/tmp/
+
 # This will allow us to refresh the snap to the more secure version.
 # We need to make sure the client certificate used in microk8s kubectl is available under $SNAP_DATA
+# TODO(neoaggelos): investigate whether this is needed
 if [ ! -f ${SNAP_DATA}/credentials/client.config ]
 then
   echo "Patching client config location"
   mkdir -p ${SNAP_DATA}/credentials/
-  cp ${SNAP}/microk8s-resources/client.config ${SNAP_DATA}/credentials/
+  cp ${SNAP}/client.config ${SNAP_DATA}/credentials/
 fi
 
 # copy kubectl-env
@@ -99,12 +164,24 @@ then
   cp ${SNAP}/default-args/kubectl ${SNAP_DATA}/args/kubectl
 fi
 
-# copy trafik
+# copy traefik
 if [ ! -e ${SNAP_DATA}/args/traefik ]
 then
   echo "Making sure we have traefik configuration"
   cp -r ${SNAP}/default-args/traefik ${SNAP_DATA}/args/
-  set_service_not_expected_to_start traefik
+fi
+
+# copy apiserver-proxy
+if [ ! -e ${SNAP_DATA}/args/apiserver-proxy ]
+then
+  echo "Making sure we have apiserver-proxy configuration"
+  cp -r ${SNAP}/default-args/apiserver-proxy ${SNAP_DATA}/args/
+fi
+
+# (1.24 -> 1.25) migrate from traefik to apiserver-proxy
+if [ -e ${SNAP_DATA}/var/lock/no-traefik ]
+then
+  touch ${SNAP_DATA}/var/lock/no-apiserver-proxy
 fi
 
 # Upgrading to containerd
@@ -143,12 +220,24 @@ then
 
 fi
 
+# Install default-hooks
+if ! [ -d "${SNAP_COMMON}/hooks" ]
+then
+  cp -r --preserve=mode ${SNAP}/default-hooks ${SNAP_COMMON}/hooks
+fi
+
+# (1.28 -> 1.29) Install 10-pods-restart hook if missing
+if ! [ -e "${SNAP_COMMON}/hooks/reconcile.d/10-pods-restart" ]; then
+  cp -r --preserve=mode "${SNAP}/default-hooks/reconcile.d/10-pods-restart" "${SNAP_COMMON}/hooks/reconcile.d/10-pods-restart"
+fi
+
 # Make sure the server certificate includes the IP we are using
 if [ "$(produce_certs)" == "1" ]
 then
     rm -rf .srl
     need_api_restart=true
     need_proxy_restart=true
+    need_cluster_agent_restart=true
 fi
 
 # Make containerd stream server listen to localhost
@@ -169,126 +258,6 @@ then
   echo "Patching 1.15 allow-privileged"
   "${SNAP}/bin/sed" -i '/allow-privileged/d' ${SNAP_DATA}/args/kubelet
     need_kubelet_restart=true
-fi
-
-if ([ -f "$SNAP_USER_COMMON/istio-auth.lock" ] || [ -f "$SNAP_USER_COMMON/istio-auth.lock" ]) && ! [ -f "$SNAP_DATA/bin/istioctl" ]
-then
-  ISTIO_VERSION="v1.0.5"
-  echo "Fetching istioctl version $ISTIO_VERSION."
-  ISTIO_ERSION=$(echo $ISTIO_VERSION | sed 's/v//g')
-  mkdir -p "${SNAP_DATA}/tmp/istio"
-  (cd "${SNAP_DATA}/tmp/istio"
-  "${SNAP}/usr/bin/curl" -L https://github.com/istio/istio/releases/download/${ISTIO_ERSION}/istio-${ISTIO_ERSION}-linux.tar.gz -o "$SNAP_DATA/tmp/istio/istio.tar.gz"
-  gzip -d "$SNAP_DATA/tmp/istio/istio.tar.gz"
-  tar -xvf "$SNAP_DATA/tmp/istio/istio.tar")
-  mkdir -p "$SNAP_DATA/bin/"
-  mv "$SNAP_DATA/tmp/istio/istio-${ISTIO_ERSION}/bin/istioctl" "$SNAP_DATA/bin/"
-  chmod +x "$SNAP_DATA/bin/istioctl"
-  mkdir -p "$SNAP_DATA/actions/istio/"
-  cp "$SNAP_DATA/tmp/istio/istio-${ISTIO_ERSION}"/install/kubernetes/helm/istio/templates/crds.yaml "$SNAP_DATA/actions/istio/"
-  mv "$SNAP_DATA/tmp/istio/istio-${ISTIO_ERSION}/install/kubernetes/istio-demo-auth.yaml" "$SNAP_DATA/actions/istio/"
-  mv "$SNAP_DATA/tmp/istio/istio-${ISTIO_ERSION}/install/kubernetes/istio-demo.yaml" "$SNAP_DATA/actions/istio/"
-  rm -rf "$SNAP_DATA/tmp/istio"
-fi
-
-if ! [ -f "$SNAP_DATA/credentials/kubelet.config" ]
-then
-  # Create the known tokens
-  touch ${SNAP_DATA}/credentials/known_tokens.csv
-  chmod 660 ${SNAP_DATA}/credentials/known_tokens.csv
-  kubelet_token=$(openssl rand -base64 32 | ${SNAP}/usr/bin/base64)
-  hostname=$(hostname)
-  echo "${kubelet_token},system:node:${hostname},kubelet-0,\"system:nodes\"" >> ${SNAP_DATA}/credentials/known_tokens.csv
-  ca_data=$(cat ${SNAP_DATA}/certs/ca.crt | ${SNAP}/usr/bin/base64 -w 0)
-
-  cp ${SNAP}/client.config.template ${SNAP_DATA}/credentials/kubelet.config
-  chmod 660 ${SNAP_DATA}/credentials/kubelet.config
-  $SNAP/bin/sed -i 's/NAME/kubelet/g' ${SNAP_DATA}/credentials/kubelet.config
-  $SNAP/bin/sed -i 's/CADATA/'"${ca_data}"'/g' ${SNAP_DATA}/credentials/kubelet.config
-  $SNAP/bin/sed -i '/username/d' ${SNAP_DATA}/credentials/kubelet.config
-  $SNAP/bin/sed -i 's/AUTHTYPE/token/g' ${SNAP_DATA}/credentials/kubelet.config
-  $SNAP/bin/sed -i 's/PASSWORD/'"${kubelet_token}"'/g' ${SNAP_DATA}/credentials/kubelet.config
-
-  refresh_opt_in_config kubeconfig \${SNAP_DATA}/credentials/kubelet.config kubelet
-  refresh_opt_in_config token-auth-file \${SNAP_DATA}/credentials/known_tokens.csv kube-apiserver
-
-  need_kubelet_restart=true
-  need_api_restart=true
-fi
-
-if ! [ -f "$SNAP_DATA/credentials/proxy.config" ]
-then
-  # Create the known tokens
-  touch ${SNAP_DATA}/credentials/known_tokens.csv
-  chmod 660 ${SNAP_DATA}/credentials/known_tokens.csv
-  proxy_token=$(openssl rand -base64 32 | ${SNAP}/usr/bin/base64)
-  echo "${proxy_token},system:kube-proxy,kube-proxy" >> ${SNAP_DATA}/credentials/known_tokens.csv
-
-  ca_data=$(cat ${SNAP_DATA}/certs/ca.crt | ${SNAP}/usr/bin/base64 -w 0)
-  cp ${SNAP}/client.config.template ${SNAP_DATA}/credentials/proxy.config
-  chmod 660 ${SNAP_DATA}/credentials/proxy.config
-  $SNAP/bin/sed -i 's/NAME/kubeproxy/g' ${SNAP_DATA}/credentials/proxy.config
-  $SNAP/bin/sed -i 's/CADATA/'"${ca_data}"'/g' ${SNAP_DATA}/credentials/proxy.config
-  $SNAP/bin/sed -i '/username/d' ${SNAP_DATA}/credentials/proxy.config
-  $SNAP/bin/sed -i 's/AUTHTYPE/token/g' ${SNAP_DATA}/credentials/proxy.config
-  $SNAP/bin/sed -i 's/PASSWORD/'"${proxy_token}"'/g' ${SNAP_DATA}/credentials/proxy.config
-
-  refresh_opt_in_config kubeconfig \${SNAP_DATA}/credentials/proxy.config kube-proxy
-  skip_opt_in_config master kube-proxy
-  refresh_opt_in_config token-auth-file \${SNAP_DATA}/credentials/known_tokens.csv kube-apiserver
-
-  need_proxy_restart=true
-  need_api_restart=true
-fi
-
-if ! [ -f "$SNAP_DATA/credentials/scheduler.config" ]
-then
-  # Create the known tokens
-  touch ${SNAP_DATA}/credentials/known_tokens.csv
-  chmod 660 ${SNAP_DATA}/credentials/known_tokens.csv
-  scheduler_token=$(openssl rand -base64 32 | ${SNAP}/usr/bin/base64)
-  echo "${scheduler_token},system:kube-scheduler,scheduler" >> ${SNAP_DATA}/credentials/known_tokens.csv
-  ca_data=$(cat ${SNAP_DATA}/certs/ca.crt | ${SNAP}/usr/bin/base64 -w 0)
-  # Create the client kubeconfig for the scheduler
-  cp ${SNAP}/client.config.template ${SNAP_DATA}/credentials/scheduler.config
-  chmod 660 ${SNAP_DATA}/credentials/scheduler.config
-  $SNAP/bin/sed -i 's/CADATA/'"${ca_data}"'/g' ${SNAP_DATA}/credentials/scheduler.config
-  $SNAP/bin/sed -i 's/NAME/scheduler/g' ${SNAP_DATA}/credentials/scheduler.config
-  $SNAP/bin/sed -i '/username/d' ${SNAP_DATA}/credentials/scheduler.config
-  $SNAP/bin/sed -i 's/AUTHTYPE/token/g' ${SNAP_DATA}/credentials/scheduler.config
-  $SNAP/bin/sed -i 's/PASSWORD/'"${scheduler_token}"'/g' ${SNAP_DATA}/credentials/scheduler.config
-
-  refresh_opt_in_config kubeconfig \${SNAP_DATA}/credentials/scheduler.config kube-scheduler
-  skip_opt_in_config master kube-scheduler
-  refresh_opt_in_config token-auth-file \${SNAP_DATA}/credentials/known_tokens.csv kube-apiserver
-
-  need_scheduler_restart=true
-  need_api_restart=true
-fi
-
-if ! [ -f "$SNAP_DATA/credentials/controller.config" ]
-then
-  # Create the known tokens
-  touch ${SNAP_DATA}/credentials/known_tokens.csv
-  chmod 660 ${SNAP_DATA}/credentials/known_tokens.csv
-  controller_token=$(openssl rand -base64 32 | ${SNAP}/usr/bin/base64)
-  echo "${controller_token},system:kube-controller-manager,controller" >> ${SNAP_DATA}/credentials/known_tokens.csv
-  ca_data=$(cat ${SNAP_DATA}/certs/ca.crt | ${SNAP}/usr/bin/base64 -w 0)
-
-  cp ${SNAP}/client.config.template ${SNAP_DATA}/credentials/controller.config
-  chmod 660 ${SNAP_DATA}/credentials/controller.config
-  $SNAP/bin/sed -i 's/CADATA/'"${ca_data}"'/g' ${SNAP_DATA}/credentials/controller.config
-  $SNAP/bin/sed -i 's/NAME/controller/g' ${SNAP_DATA}/credentials/controller.config
-  $SNAP/bin/sed -i '/username/d' ${SNAP_DATA}/credentials/controller.config
-  $SNAP/bin/sed -i 's/AUTHTYPE/token/g' ${SNAP_DATA}/credentials/controller.config
-  $SNAP/bin/sed -i 's/PASSWORD/'"${controller_token}"'/g' ${SNAP_DATA}/credentials/controller.config
-
-  refresh_opt_in_config kubeconfig \${SNAP_DATA}/credentials/controller.config kube-controller-manager
-  skip_opt_in_config master kube-controller-manager
-  refresh_opt_in_config use-service-account-credentials true kube-controller-manager
-
-  refresh_opt_in_config token-auth-file \${SNAP_DATA}/credentials/known_tokens.csv kube-apiserver
-  need_controller_restart=true
 fi
 
 # Add option to support kata containers
@@ -320,25 +289,50 @@ then
   mv ${CD_TOML_TMP} ${CD_TOML}
 fi
 
-# Securing important directories
-for dir in ${SNAP_DATA}/credentials/ ${SNAP_DATA}/certs/ ${SNAP_DATA}/args/ ${SNAP_DATA}/var/lock
+for dir in ${SNAP_COMMON}/plugins ${SNAP_COMMON}/addons ${SNAP_DATA}/credentials/ ${SNAP_DATA}/certs/ ${SNAP_DATA}/args/ ${SNAP_DATA}/var/lock ${SNAP_DATA}/tmp/ ${SNAP_COMMON}/hooks
 do
   chmod -R ug+rwX ${dir}
   chmod -R o-rwX ${dir}
 done
 
-# Try to create the microk8s group. Do not fail the installation if something goes wrong
-if ! getent group microk8s >/dev/null 2>&1
+group=$(get_microk8s_or_cis_group)
+
+# Try to create the snap_microk8s group. Do not fail the installation if something goes wrong
+if ! getent group ${group} >/dev/null 2>&1
 then
-  groupadd --system microk8s || true
+  groupadd ${group} || true
 fi
 
-if getent group microk8s >/dev/null 2>&1
+if getent group ${group} >/dev/null 2>&1 && ! [ -e "${SNAP_DATA}/var/lock/cis-hardening" ]
 then
-  chgrp microk8s -R ${SNAP_DATA}/credentials/ ${SNAP_DATA}/certs/ ${SNAP_DATA}/args/ ${SNAP_DATA}/var/lock/ ${SNAP_DATA}/var/kubernetes/backend/ || true
+  chgrp ${group} -R ${SNAP_COMMON}/plugins ${SNAP_COMMON}/addons ${SNAP_DATA}/credentials/ ${SNAP_DATA}/certs/ ${SNAP_DATA}/args/ ${SNAP_DATA}/var/lock/ ${SNAP_DATA}/var/kubernetes/backend/ ${SNAP_DATA}/tmp/ ${SNAP_COMMON}/hooks || true
 fi
 
-try_copy_users_to_snap_microk8s
+if [ -e "${SNAP_DATA}/var/lock/cis-hardening" ]
+then
+  chmod -R g-wr ${SNAP_COMMON}/plugins ${SNAP_COMMON}/addons ${SNAP_DATA}/credentials/ ${SNAP_DATA}/certs/ ${SNAP_DATA}/args/ ${SNAP_DATA}/var/lock/ ${SNAP_DATA}/var/kubernetes/backend/ ${SNAP_DATA}/tmp/ ${SNAP_COMMON}/hooks || true
+  chmod -R o-wr ${SNAP_COMMON}/plugins ${SNAP_COMMON}/addons ${SNAP_DATA}/credentials/ ${SNAP_DATA}/certs/ ${SNAP_DATA}/args/ ${SNAP_DATA}/var/lock/ ${SNAP_DATA}/var/kubernetes/backend/ ${SNAP_DATA}/tmp/ ${SNAP_COMMON}/hooks || true
+
+  if ! is_strict && [ -e /etc/systemd/system/snap.microk8s.daemon-kubelite.service ]
+  then
+    chmod -R g-wr /etc/systemd/system/snap.microk8s.daemon-kubelite.service
+    chmod -R o-wr /etc/systemd/system/snap.microk8s.daemon-kubelite.service
+  fi
+fi
+
+if ! is_strict
+then
+  try_copy_users_to_snap_microk8s
+fi
+
+# as only one cni bin dir can be used we will use the one in SNAP_DATA but have links to
+# the real CNI plugins we distribute in SNAP
+mkdir -p "${SNAP_DATA}/opt/cni/bin/"
+(
+  cd "${SNAP}/opt/cni/bin/"
+  MY_SNAP_DIR=$(dirname "${SNAP}")
+  for i in *; do ln -sf "${MY_SNAP_DIR}/current/opt/cni/bin/$i" "${SNAP_DATA}/opt/cni/bin/${i}"; done
+)
 
 if ! [ -e "${SNAP_DATA}/opt/cni/bin/flanneld" ]
 then
@@ -346,14 +340,6 @@ then
   if [ -f "${SNAP_DATA}/opt/cni/bin/loopback" ] && [ -f "${SNAP}/opt/cni/bin/loopback" ]; then
     rm -f "${SNAP_DATA}/opt/cni/bin/loopback"
   fi
-  # as only one cni bin dir can be used we will use the one in SNAP_DATA but have links to
-  # the real CNI plugins we distribute in SNAP
-  mkdir -p "${SNAP_DATA}/opt/cni/bin/"
-  (
-    cd "${SNAP}/opt/cni/bin/"
-    MY_SNAP_DIR=$(dirname "${SNAP}")
-    for i in *; do ln -s "${MY_SNAP_DIR}/current/opt/cni/bin/$i" "${SNAP_DATA}/opt/cni/bin/${i}"; done
-  )
 fi
 
 if ! [ -f "${SNAP_DATA}/args/flanneld" ]
@@ -387,25 +373,6 @@ then
   need_api_restart=true
 fi
 
-if grep -e "basic-auth-file" ${SNAP_DATA}/args/kube-apiserver
-then
-  echo "Removing basic auth"
-  # Create the client kubeconfig
-  ca_data=$(cat ${SNAP_DATA}/certs/ca.crt | ${SNAP}/usr/bin/base64 -w 0)
-  admin_token=$(openssl rand -base64 32 | ${SNAP}/usr/bin/base64)
-  echo "${admin_token},admin,admin,\"system:masters\"" >> ${SNAP_DATA}/credentials/known_tokens.csv
-  cp ${SNAP}/client.config.template ${SNAP_DATA}/credentials/client.config
-  chmod 660 ${SNAP_DATA}/credentials/client.config
-  $SNAP/bin/sed -i 's/CADATA/'"${ca_data}"'/g' ${SNAP_DATA}/credentials/client.config
-  $SNAP/bin/sed -i 's/NAME/admin/g' ${SNAP_DATA}/credentials/client.config
-  $SNAP/bin/sed -i '/username/d' ${SNAP_DATA}/credentials/client.config
-  $SNAP/bin/sed -i 's/AUTHTYPE/token/g' ${SNAP_DATA}/credentials/client.config
-  $SNAP/bin/sed -i 's/PASSWORD/'"${admin_token}"'/g' ${SNAP_DATA}/credentials/client.config
-
-  skip_opt_in_config basic-auth-file kube-apiserver
-  need_api_restart=true
-fi
-
 if ! grep -e "service-account-issuer" ${SNAP_DATA}/args/kube-apiserver
 then
   echo "--service-account-issuer='https://kubernetes.default.svc'" >> ${SNAP_DATA}/args/kube-apiserver
@@ -418,10 +385,42 @@ then
   need_api_restart=true
 fi
 
-# Needed by the storage addon
-if ! grep -e "RemoveSelfLink" ${SNAP_DATA}/args/kube-apiserver
+# Disable the watchlist feature until k8s-dqlite can handle it
+if ! grep -e "WatchList" ${SNAP_DATA}/args/kube-apiserver
 then
-  echo "--feature-gates=RemoveSelfLink=false" >> ${SNAP_DATA}/args/kube-apiserver
+  if ! grep -e "--feature-gates=" ${SNAP_DATA}/args/kube-apiserver
+  then
+    echo '--feature-gates=WatchList=false' >> ${SNAP_DATA}/args/kube-apiserver
+  else
+    # Find the line starting with --feature-gates= and append ,WatchList=false
+    "${SNAP}/bin/sed" -i '/^--feature-gates=/ s/$/,WatchList=false/' "$SNAP_DATA/args/kube-apiserver"
+  fi
+
+  need_api_restart=true
+fi
+
+# RemoveSelfLink feature flag is removed after 1.24
+if grep -e "feature-gates=RemoveSelfLink" ${SNAP_DATA}/args/kube-apiserver
+then
+  "${SNAP}/bin/sed" -i '/feature-gates=RemoveSelfLink/d' "$SNAP_DATA/args/kube-apiserver"
+  need_api_restart=true
+fi
+
+if remove_docker_specific_args
+then
+  need_kubelet_restart=true
+fi
+
+# scheduler --address flag is removed after 1.24
+if grep -e "--address=" ${SNAP_DATA}/args/kube-scheduler
+then
+  "${SNAP}/bin/sed" -i '/--address=/d' "$SNAP_DATA/args/kube-scheduler"
+fi
+
+# controller-manager --address flag is removed after 1.24
+if grep -e "--address=" ${SNAP_DATA}/args/kube-controller-manager
+then
+  "${SNAP}/bin/sed" -i '/--address=/d' "$SNAP_DATA/args/kube-controller-manager"
   need_api_restart=true
 fi
 
@@ -429,13 +428,6 @@ if ! grep '\-\-enable\-v2' ${SNAP_DATA}/args/etcd
 then
   refresh_opt_in_config enable-v2 true etcd
   snapctl restart ${SNAP_NAME}.daemon-etcd
-fi
-
-if [ -L "${SNAP_DATA}/bin/cilium" ]
-then
-  echo "Cilium is enabled we need to reconfigure it."
-  rm -rf $SNAP_DATA/bin/cilium*
-  ${SNAP}/actions/enable.cilium.sh
 fi
 
 if [ -e ${SNAP_DATA}/var/lock/clustered.lock ]
@@ -472,15 +464,6 @@ then
   snapctl restart ${SNAP_NAME}.daemon-containerd
 fi
 
-mkdir -p "$SNAP_DATA/juju/share/juju" "$SNAP_DATA/juju-home"
-chmod -R ug+rwX "$SNAP_DATA/juju" "$SNAP_DATA/juju-home"
-chmod -R o-rwX "$SNAP_DATA/juju" "$SNAP_DATA/juju-home"
-
-if getent group microk8s >/dev/null 2>&1
-then
-    chgrp microk8s -R "$SNAP_DATA/juju" "$SNAP_DATA/juju-home" || true
-fi
-
 if ! grep -e "\-\-ip-masq" ${SNAP_DATA}/args/flanneld
 then
   refresh_opt_in_config ip-masq true flanneld
@@ -513,12 +496,6 @@ then
   else
     snapctl start ${SNAP_NAME}.daemon-kubelite
   fi
-  snapctl stop ${SNAP_NAME}.daemon-apiserver
-  snapctl stop ${SNAP_NAME}.daemon-proxy
-  snapctl stop ${SNAP_NAME}.daemon-kubelet
-  snapctl stop ${SNAP_NAME}.daemon-controller-manager
-  snapctl stop ${SNAP_NAME}.daemon-scheduler
-  snapctl stop ${SNAP_NAME}.daemon-control-plane-kicker
 fi
 
 if ! [ -e ${SNAP_DATA}/args/kubelite ]
@@ -530,7 +507,8 @@ fi
 # Removed --insecure-port argument
 if grep -e "\-\-insecure\-port" ${SNAP_DATA}/args/kube-apiserver
 then
-  skip_opt_in_config "insecure-port" kube-apiserver
+  $SNAP/bin/sed -i '/\-\-insecure\-port/d' ${SNAP_DATA}/args/kube-apiserver
+  need_api_restart=true
 fi
 
 # Are we using etcd or some other non-dqlite datastore?
@@ -550,12 +528,7 @@ then
   cp ${SNAP}/default-args/k8s-dqlite ${SNAP_DATA}/args/k8s-dqlite
   cp ${SNAP}/default-args/k8s-dqlite-env ${SNAP_DATA}/args/k8s-dqlite-env
   need_api_restart=true
-  if [ -e ${SNAP_DATA}/var/lock/lite.lock ]
-  then
-    snapctl stop ${SNAP_NAME}.daemon-kubelite
-  else
-    snapctl stop ${SNAP_NAME}.daemon-apiserver
-  fi
+  snapctl stop ${SNAP_NAME}.daemon-kubelite
 
   refresh_opt_in_local_config etcd-servers unix://\${SNAP_DATA}/var/kubernetes/backend/kine.sock:12379 kube-apiserver
   $SNAP/bin/sed -i '/\-\-storage\-backend=dqlite/d' ${SNAP_DATA}/args/kube-apiserver
@@ -568,6 +541,39 @@ then
   $SNAP/bin/sed -i '/\-\-storage\-dir/d' ${SNAP_DATA}/args/kube-apiserver
 
   snapctl restart ${SNAP_NAME}.daemon-k8s-dqlite
+fi
+
+# Fix hard-coded snap revision numbers in worker node services of existing clusters
+# https://github.com/canonical/microk8s/pull/3554
+for svc in kubelet proxy; do
+  cfg="${SNAP_DATA}/credentials/${svc}.config"
+  if [ -e ${cfg} ]; then
+    sed -i 's,/var/snap/microk8s/[x0-9]*/,/var/snap/microk8s/current/,' "${cfg}" || true
+  fi
+done
+
+# (1.26) Removed --log-dir argument from kubelet
+if grep -e "\-\-log\-dir" "${SNAP_DATA}/args/kubelet"
+then
+  "${SNAP}/bin/sed" -i '/\-\-log\-dir/d' "${SNAP_DATA}/args/kubelet"
+  need_api_restart=true
+fi
+
+# Refresh calico if needed
+refresh_calico_if_needed
+
+# Refresh apiserver proxy
+snapctl restart "${SNAP_NAME}.daemon-apiserver-proxy"
+
+if is_strict
+then
+  enable_snap
+fi
+
+# if we are refreshing in a no-flanneld we need to restart the CNI pods because they mount parts of $SNAP_DATA
+if [ -e "${SNAP_DATA}/var/lock/no-flanneld" ]
+then
+  touch "${SNAP_DATA}/var/lock/snapdata-mounts-need-reload"
 fi
 
 # Restart reconfigured services
@@ -584,39 +590,7 @@ then
     exit 1
   fi
 fi
-
-# if we are refreshing in a no-flanneld we need to restart the CNI pods because they mount parts of $SNAP_DATA
-if [ -e "${SNAP_DATA}/var/lock/no-flanneld" ]
+if ${need_cluster_agent_restart}
 then
-  touch "${SNAP_DATA}/var/lock/cni-needs-reload"
-fi
-
-if [ -e "${SNAP_DATA}/args/cni-network/cni.yaml" ] &&
-   [ -e "${SNAP_DATA}/var/lock/ha-cluster" ] &&
-   ! [ -e "${SNAP_DATA}/var/lock/clustered.lock" ]
-then
-  echo "Setting up the CNI"
-  start_timer="$(date +%s)"
-  # Wait up to two minutes for the apiserver to come up.
-  # TODO: this polling is not good enough. We should find a new way to ensure the apiserver is up.
-  timeout="120"
-  KUBECTL="$SNAP/kubectl --kubeconfig=${SNAP_DATA}/credentials/client.config"
-  while ! (is_apiserver_ready)
-  do
-    sleep 5
-    now="$(date +%s)"
-    if [[ "$now" > "$(($start_timer + $timeout))" ]] ; then
-      break
-    fi
-  done
-
-  # if the API server came up try to load the CNI manifest
-  now="$(date +%s)"
-  if [[ "$now" < "$(($start_timer + $timeout))" ]] ; then
-    if (is_apiserver_ready) &&
-        $KUBECTL apply -f "${SNAP_DATA}/args/cni-network/cni.yaml"
-    then
-      touch "${SNAP_DATA}/var/lock/cni-loaded"
-    fi
-  fi
+  snapctl restart ${SNAP_NAME}.daemon-cluster-agent
 fi

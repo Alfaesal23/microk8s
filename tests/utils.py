@@ -3,10 +3,18 @@ import datetime
 import time
 import yaml
 import platform
+import psutil
 from subprocess import check_output, CalledProcessError, check_call
 
 
 arch_translate = {"aarch64": "arm64", "x86_64": "amd64"}
+
+
+def get_arch():
+    """
+    Returns the architecture we are running on
+    """
+    return arch_translate[platform.machine()]
 
 
 def run_until_success(cmd, timeout_insec=60, err_out=None):
@@ -249,3 +257,21 @@ def is_container():
         print("no indication of a container in /proc")
 
     return False
+
+
+def is_strict():
+    if "STRICT" in os.environ and os.environ["STRICT"] == "yes":
+        return True
+    return False
+
+
+def is_ipv6_configured():
+    try:
+        output = check_output(["ip", "-6", "address"])
+        return b"inet6" in output
+    except CalledProcessError:
+        return False
+
+
+def _get_process(name):
+    return [p for p in psutil.process_iter() if name == p.name()]

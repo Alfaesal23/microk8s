@@ -31,7 +31,7 @@ sudo usermod -a -G lxd ${USER}
 Build the snap with:
 
 ```shell
-git clone http://github.com/ubuntu/microk8s
+git clone http://github.com/canonical/microk8s
 cd ./microk8s/
 snapcraft --use-lxd
 ```
@@ -51,7 +51,7 @@ To produce a custom build with specific component versions you cannot use the sn
 lxc launch ubuntu:16.04 --ephemeral test-build
 lxc exec test-build -- snap install snapcraft --classic
 lxc exec test-build -- apt update
-lxc exec test-build -- git clone https://github.com/ubuntu/microk8s
+lxc exec test-build -- git clone https://github.com/canonical/microk8s
 ```
 
 You can then set the following environment variables prior to building:
@@ -90,20 +90,22 @@ snap install microk8s_*_amd64.snap --classic --dangerous
 
 The calico CNI manifest can be found under `upgrade-scripts/000-switch-to-calico/resources/calico.yaml`.
 Building the manifest is subject to the upstream calico project k8s installation process.
-At the time of the v3.13.2 release. The `calico.yaml` manifest is a slightly modified version of:
-`https://docs.projectcalico.org/manifests/calico.yaml`:
+The `calico.yaml` manifest is a slightly modified version of:
+`https://projectcalico.docs.tigera.io/archive/v3.25/manifests/calico.yaml`:
 
+- Set the calico backend from "bird" to "vxlan": `calico_backend: "vxlan"`
 - `CALICO_IPV4POOL_CIDR` was set to "10.1.0.0/16"
-- `CNI_NET_DIR` was set to "/var/snap/microk8s/current/args/cni-network"
+- `CNI_NET_DIR` had to be added and set to "/var/snap/microk8s/current/args/cni-network"
 - We set the following mount paths:
   1. `var-run-calico` to `/var/snap/microk8s/current/var/run/calico`
   1. `var-lib-calico` to `/var/snap/microk8s/current/var/lib/calico`
   1. `cni-bin-dir` to `/var/snap/microk8s/current/opt/cni/bin`
   1. `cni-net-dir` to `/var/snap/microk8s/current/args/cni-network`
+  1. `cni-log-dir` to `/var/snap/microk8s/common/var/log/calico/cni`
   1. `host-local-net-dir` to `/var/snap/microk8s/current/var/lib/cni/networks`
   1. `policysync` to `/var/snap/microk8s/current/var/run/nodeagent`
 - We enabled vxlan following the instructions in [the official docs.](https://docs.projectcalico.org/getting-started/kubernetes/installation/config-options#switching-from-ip-in-ip-to-vxlan)
-- `FELIX_LOGSEVERITYSCREEN` was set to "error"
+- The `liveness` and `readiness` probes of `bird-live` was commented out
 - We set the IP autodetection method to
 
   ```dtd
@@ -111,9 +113,25 @@ At the time of the v3.13.2 release. The `calico.yaml` manifest is a slightly mod
               value: "first-found"
   ```
 - In the `cni_network_config` in the calico manifest we also set:
+  ```dtd
+          "log_file_path": "/var/snap/microk8s/common/var/log/calico/cni/cni.log",
+          "nodename_file": "/var/snap/microk8s/current/var/lib/calico/nodename",
+  ```
+- The `mount-bpffs` pod is commented out. This disables eBPF support but allows the CNI to deploy inside an LXC container.
+- The bpffs mount is commented out:
 
-          "nodename_file_optional": true,
- 
+  ```dtd
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+  ```
+  end
+
+  ```dtd
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+  ```
 
 ## Running the tests locally
 
@@ -143,17 +161,16 @@ First, run the static analysis using Tox. Run the following command in the root 
 tox -e lint
 ```
 
-Then, use the "Building the snap from source" instructions to build the snap and install it locally. The tests check this locally installed MicroK8s instance. 
+Then, use the "Building the snap from source" instructions to build the snap and install it locally. The tests check this locally installed MicroK8s instance.
 
-Finally, run the tests themselves. The `test-addons.py` and `test-upgrade.py` files under the `tests` directory are the two main files of our test suite. Running the tests is done with pytest:
+Finally, run the tests themselves. The `test-simple.py` and `test-upgrade.py` files under the `tests` directory are the two main files of our test suite. Running the tests is done with pytest:
 
 ```shell
-cd tests/
-pytest -s test-addons.py
-pytest -s test-upgrade.py
+pytest -s tests/test-simple.py
+pytest -s tests/test-upgrade.py
 ```
 
-Note: the `ingress` and `dashboard-ingress` tests make use of nip.io for wildcard ingress domains on localhost. [DNS rebinding protection](https://en.wikipedia.org/wiki/DNS_rebinding) may prevent the resolution of the domains used in the tests. 
+Note: the `ingress` and `dashboard-ingress` tests make use of nip.io for wildcard ingress domains on localhost. [DNS rebinding protection](https://en.wikipedia.org/wiki/DNS_rebinding) may prevent the resolution of the domains used in the tests.
 
 A workaround is adding these entries to `/etc/hosts`:
 ```

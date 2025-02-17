@@ -1,17 +1,18 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -ex
 
-export PATH="$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
-ARCH="$($SNAP/bin/uname -m)"
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SNAP/lib:$SNAP/usr/lib:$SNAP/lib/$ARCH-linux-gnu:$SNAP/usr/lib/$ARCH-linux-gnu"
-export LD_LIBRARY_PATH=$SNAP_LIBRARY_PATH:$LD_LIBRARY_PATH
-export XDG_RUNTIME_DIR="${SNAP_COMMON}/run"
-mkdir -p "${XDG_RUNTIME_DIR}"
-
 source $SNAP/actions/common/utils.sh
 
+use_snap_env
+
 exit_if_service_not_expected_to_start k8s-dqlite
+
+if [ -e "${SNAP_DATA}/var/lock/low-memory-guard.lock" ]
+then
+	echo "not starting dqlite because of low memory guard lock"
+	exit 0
+fi
 
 app=k8s-dqlite
 
@@ -22,6 +23,17 @@ fi
 
 # We add some delay so that systemd really retries the restarts
 sleep 6
+
+if [ ! -e "${SNAP_DATA}/var/lock/skip-aio-tune.lock" ]
+then
+  increase_sysctl_parameter "fs.aio-max-nr" "1048576"
+fi
+
+if [ ! -e "${SNAP_DATA}/var/lock/skip-inotify-tune.lock" ]
+then
+  increase_sysctl_parameter "fs.inotify.max_user_instances" "1024"
+  increase_sysctl_parameter "fs.inotify.max_user_watches" "1048576"
+fi
 
 set -a
 if [ -e "${SNAP_DATA}/args/${app}-env" ]

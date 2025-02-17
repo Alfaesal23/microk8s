@@ -1,28 +1,45 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -ex
 
-# Re-exec outside of apparmor confinement
-if [ -d /sys/kernel/security/apparmor ] && [ "$(cat /proc/self/attr/current)" != "unconfined" ]; then
-    exec aa-exec -p unconfined -- "$0" "$@"
-fi
-
-export PATH="$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
-ARCH="$($SNAP/bin/uname -m)"
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SNAP/lib:$SNAP/usr/lib:$SNAP/lib/$ARCH-linux-gnu:$SNAP/usr/lib/$ARCH-linux-gnu"
-export LD_LIBRARY_PATH=$SNAP_LIBRARY_PATH:$LD_LIBRARY_PATH
-export XDG_RUNTIME_DIR="${SNAP_COMMON}/run"
-mkdir -p "${XDG_RUNTIME_DIR}"
-
 source $SNAP/actions/common/utils.sh
 
-if [ -d "/etc/apparmor.d" ]; then
-  echo "Using a default profile template"
-  cp ${SNAP}/containerd-profile /etc/apparmor.d/cri-containerd.apparmor.d
-  echo "Reloading AppArmor profiles"
-  if ! service apparmor reload
-  then
-    echo "AppArmor profiles loading failed. AppArmor may be unavailable on this host."
+use_snap_env
+
+# Re-exec outside of apparmor confinement
+if ! is_strict && [ -d /sys/kernel/security/apparmor ]; then
+    status_file=/proc/self/attr/apparmor/current
+    # Fallback for older kernels, check the legacy interfaces
+    # https://www.kernel.org/doc/html/latest/admin-guide/LSM/index.html
+    if [ ! -f $status_file ]; then
+        status_file=/proc/self/attr/current
+    fi
+    if [ "$(cat $status_file)" != "unconfined" ]; then
+        exec aa-exec -p unconfined -- "$0" "$@"
+    fi
+fi
+
+# Why we put the /snap/microk8s/current in the path?
+# containerd-shims need to call runc. They inherit their PATH from containerd.
+# As the snap refreshes runc changes location, eg moves from
+# /snap/microk8s/123/usr/bin/runc to /snap/microk8s/124/usr/runc.
+# containerd-shims need to look for runc in  /snap/microk8s/current/usr/bin/runc
+SNAP_CURRENT=`echo "${SNAP}" | sed -e "s,${SNAP_REVISION},current,"`
+CURRENT_PATH="$SNAP_CURRENT/usr/sbin:$SNAP_CURRENT/usr/bin:$SNAP_CURRENT/sbin:$SNAP_CURRENT/bin"
+export PATH="$CURRENT_PATH:$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
+
+if is_strict
+then
+  apparmor_parser -r $SNAP/containerd-profile
+else
+  if [ -d "/etc/apparmor.d" ]; then
+    echo "Using a default profile template"
+    cp ${SNAP}/containerd-profile /etc/apparmor.d/cri-containerd.apparmor.d
+    echo "Reloading AppArmor profiles"
+    if ! service apparmor reload
+    then
+      echo "AppArmor profiles loading failed. AppArmor may be unavailable on this host."
+    fi
   fi
 fi
 
@@ -33,7 +50,7 @@ RUNTIME="runc"
 RUNTIME_TYPE="io.containerd.runc.v1"
 SNAPSHOTTER=$(snapshotter)
 
-if mount | grep -q 'cgroup2 on /sys/fs/cgroup'; then
+if mount -t cgroup2 | grep -q 'type cgroup2'; then
   RUNTIME_TYPE="io.containerd.runc.v2"
 fi
 
@@ -48,12 +65,16 @@ then
 fi
 
 # clean leftover container state if we just booted
-if (is_first_boot "${SNAP_COMMON}/run/containerd")
+if (is_strict && is_first_boot_on_strict) || (! is_strict && is_first_boot "${SNAP_COMMON}/run/containerd")
 then
   rm -rf "${SNAP_COMMON}/run/containerd" || true
 fi
+
 mkdir -p "${SNAP_COMMON}/run/containerd"
-mark_boot_time "${SNAP_COMMON}/run/containerd"
+if ! is_strict
+then
+  mark_boot_time "${SNAP_COMMON}/run/containerd"
+fi
 
 # This is really the only way I could find to get the args passed in correctly.
 declare -a args="($(cat $SNAP_DATA/args/$app))"
@@ -61,16 +82,15 @@ set -a
 . "${SNAP_DATA}/args/${app}-env"
 set +a
 
-# wait up to two minutes for the default network interface to appear.
-n=0
-until [ $n -ge 20 ]
-do
-  ip route | grep default &> /dev/null && break
-  ip -6 route | grep default &> /dev/null && break
-  echo "Waiting for default route to appear. (attempt $n)"
-  n=$[$n+1]
-  sleep 6
-done
+# check if there is a default route available
+if ! default_route_exists
+then
+  echo "WARNING: No default route exists. MicroK8s might not work properly."
+  echo "Refer to https://microk8s.io/docs for instructions on air-gap deployments."
+fi
+
+# NOTE(neoaggelos): See https://github.com/canonical/microk8s/issues/423 for context
+wait_for_default_route
 
 # Set the path to the Cilium socket correctly for CNI
 export CILIUM_SOCK="${SNAP_DATA}/var/run/cilium/cilium.sock"

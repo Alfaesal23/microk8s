@@ -1,11 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 set -e
-export PATH="$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
-ARCH="$($SNAP/bin/uname -m)"
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SNAP/lib:$SNAP/usr/lib:$SNAP/lib/$ARCH-linux-gnu:$SNAP/usr/lib/$ARCH-linux-gnu"
-export LD_LIBRARY_PATH=$SNAP_LIBRARY_PATH:$LD_LIBRARY_PATH
 
 source $SNAP/actions/common/utils.sh
+use_snap_env
 
 exit_if_service_not_expected_to_start etcd
 
@@ -16,8 +14,8 @@ then
 fi
 
 # etcd will not start if the socket already exists.
-if [ -S "/var/snap/microk8s/current/etcd.socket:2379" ]; then
-  rm "/var/snap/microk8s/current/etcd.socket:2379"
+if [ -S "${SNAP_DATA}/etcd.socket:2379" ]; then
+  rm "${SNAP_DATA}/etcd.socket:2379"
 fi
 
 ARCH=$(arch)

@@ -1,19 +1,17 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -eu
 
-export PATH="$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
-ARCH="$($SNAP/bin/uname -m)"
-export IN_SNAP_LD_LIBRARY_PATH="$SNAP/lib:$SNAP/usr/lib:$SNAP/lib/$ARCH-linux-gnu:$SNAP/usr/lib/$ARCH-linux-gnu"
-export PYTHONNOUSERSITE=false
-
 source $SNAP/actions/common/utils.sh
 
-if [ -e  "$SNAP_DATA/args/cni-network/cni.yaml.disabled" ] && [ -e "$SNAP_DATA/args/cni-network/05-cilium-cni.conf" ] ; then 
-  echo "Cilium is enabled and is not suitable for multi node clusters."
-  exit 1
+use_snap_env
+
+if [ -d "$SNAP_COMMON/default-storage" ]
+then
+  echo "WARNING: Hostpath storage is enabled and is not suitable for multi node clusters."
+  echo ""
 fi
 
 exit_if_no_permissions
 
-sudo -E  LD_LIBRARY_PATH=$IN_SNAP_LD_LIBRARY_PATH ${SNAP}/usr/bin/python3 ${SNAP}/scripts/cluster/join.py $@
+run_with_sudo ${SNAP}/usr/bin/python3 ${SNAP}/scripts/wrappers/join.py "${@}"

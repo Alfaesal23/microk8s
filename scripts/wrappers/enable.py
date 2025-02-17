@@ -10,13 +10,15 @@ from common.utils import (
     wait_for_ready,
     xable,
 )
-from status import get_available_addons, get_current_arch, get_status
 
 
-@click.command(context_settings={"ignore_unknown_options": True})
+@click.command(
+    context_settings={"ignore_unknown_options": True, "help_option_names": ["-h", "--help"]},
+)
 @click.argument("addons", nargs=-1, required=True)
-def enable(addons):
-    """Enables a MicroK8s addon.
+def enable(addons) -> None:
+    """
+    Enable a MicroK8s addon.
 
     For a list of available addons, run `microk8s status`.
 
@@ -24,19 +26,15 @@ def enable(addons):
 
         microk8s enable ADDON -- --help
     """
-
     if check_help_flag(addons):
         return
 
     is_cluster_locked()
     exit_if_no_permission()
     ensure_started()
-    wait_for_ready(timeout=30)
+    wait_for_ready(timeout=30, with_ready_node=False)
 
-    enabled_addons, _ = get_status(get_available_addons(get_current_arch()), True)
-    enabled_addons = {a["name"] for a in enabled_addons}
-
-    xable("enable", addons, enabled_addons)
+    xable("enable", addons)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@ set -ex
 echo "Switching master to dqlite"
 
 source $SNAP/actions/common/utils.sh
-CA_CERT=/snap/core18/current/etc/ssl/certs/ca-certificates.crt
 
 BACKUP_DIR="$SNAP_DATA/var/tmp/upgrades/001-switch-to-dqlite"
 DB_DIR="$BACKUP_DIR/db"
@@ -17,7 +16,7 @@ ${SNAP}/microk8s-stop.wrapper
 cp "$SNAP_DATA"/args/kube-apiserver "$BACKUP_DIR/args"
 # Configure the API sever to talk to the external dqlite
 if [ -e ${SNAP}/default-args/k8s-dqlite ] &&
-   ! [ -e ${SNAP_DATA}/args/k8s-dqlite ] &&
+   ! [ -e ${SNAP_DATA}/args/k8s-dqlite ]
 then
   echo "Reconfiguring the API server for dqlite"
   cp ${SNAP}/default-args/k8s-dqlite ${SNAP_DATA}/args/k8s-dqlite
@@ -46,13 +45,8 @@ then
   init_cluster
 fi
 
-if [ -e "$SNAP_DATA"/var/lock/lite.lock ]
-then
-  snapctl restart ${SNAP_NAME}.daemon-kubelite
-else
-  snapctl restart ${SNAP_NAME}.daemon-apiserver
-fi
 snapctl restart ${SNAP_NAME}.daemon-k8s-dqlite
+snapctl restart ${SNAP_NAME}.daemon-kubelite
 
 run_etcd="$(is_service_expected_to_start etcd)"
 if [ "${run_etcd}" == "1" ]
@@ -62,13 +56,13 @@ then
   sleep 15
 
   rm -rf "$DB_DIR"
-  $SNAP/bin/migrator --mode backup --endpoint "http://127.0.0.1:12379" --db-dir "$DB_DIR" --debug
+  $SNAP/bin/k8s-dqlite migrator --mode backup --endpoint "http://127.0.0.1:12379" --db-dir "$DB_DIR" --debug
   chmod 600 "$DB_DIR"
   # Wait up to two minutes for the apiserver to come up.
   # TODO: this polling is not good enough. We should find a new way to ensure the apiserver is up.
   timeout="120"
   start_timer="$(date +%s)"
-  while ! (is_apiserver_ready) 
+  while ! (is_apiserver_ready)
   do
     sleep 5
     now="$(date +%s)"
@@ -82,7 +76,7 @@ then
   if [[ "$now" < "$(($start_timer + $timeout))" ]] ; then
     if (is_apiserver_ready)
     then
-        $SNAP/bin/migrator --mode restore --endpoint "unix:///var/snap/microk8s/current/var/kubernetes/backend/kine.sock:12379" --db-dir "$DB_DIR" --debug
+        $SNAP/bin/k8s-dqlite migrator --mode restore --endpoint "unix://${SNAP_DATA}/var/kubernetes/backend/kine.sock:12379" --db-dir "$DB_DIR" --debug
     fi
   fi
 
@@ -92,6 +86,7 @@ then
   set_service_expected_to_start k8s-dqlite
 fi
 
+rm -rf ${SNAP_DATA}/var/lock/cni-loaded
 ${SNAP}/microk8s-start.wrapper
 ${SNAP}/microk8s-status.wrapper --wait-ready --timeout 120
 

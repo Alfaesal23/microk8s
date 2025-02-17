@@ -1,6 +1,6 @@
 # Contributor Guide
 
-MicroK8s is open source ([Apache License 2.0](./LICENSE)) and actively seeks any community contibutions for code, add-ons, suggestions and documentation.
+MicroK8s is open source ([Apache License 2.0](./LICENSE)) and actively seeks any community contributions for code, add-ons, suggestions and documentation.
 Many of the features currently part of MicroK8s originated in the community, and we are very keen for that to continue. This page details a few notes, 
 workflows and suggestions for how to make contributions most effective and help us all build a better MicroK8s for everyone - please give them a read before
 working on any contributions.
@@ -22,7 +22,7 @@ MicroK8s has adopted the Ubuntu code of Conduct. You can read this in full [here
 
 The workflow for contributing code is as follows:
 
-1. **Create/choose an issue**: MicroK8s tracks issues at [https://github.com/ubuntu/microk8s/issues](https://github.com/ubuntu/microk8s/issues). If you
+1. **Create/choose an issue**: MicroK8s tracks issues at [https://github.com/canonical/microk8s/issues](https://github.com/canonical/microk8s/issues). If you
    want to work on a new feature, create an issue first! This gives everyone a place to discuss scope and implementation.
 2. **Create a fork of the MicroK8s repo**
 3. **Make a new branch for your contribution**. Write your code there.

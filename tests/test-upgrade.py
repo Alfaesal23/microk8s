@@ -5,13 +5,11 @@ from validators import (
     validate_dns_dashboard,
     validate_storage,
     validate_ingress,
-    validate_gpu,
     validate_registry,
     validate_forward,
     validate_metrics_server,
-    validate_fluentd,
-    validate_jaeger,
     validate_metallb_config,
+    validate_dual_stack,
 )
 from subprocess import check_call, CalledProcessError
 from utils import (
@@ -20,6 +18,9 @@ from utils import (
     wait_for_installation,
     run_until_success,
     is_container,
+    is_ipv6_configured,
+    kubectl,
+    _get_process,
 )
 
 upgrade_from = os.environ.get("UPGRADE_MICROK8S_FROM", "beta")
@@ -39,17 +40,33 @@ class TestUpgrade(object):
 
         """
         print("Testing upgrade from {} to {}".format(upgrade_from, upgrade_to))
+        if is_ipv6_configured:
+            print("IPv6 is configured, will test dual stack")
+            launch_config = """---
+version: 0.1.0
+extraCNIEnv:
+  IPv4_SUPPORT: true
+  IPv4_CLUSTER_CIDR: 10.3.0.0/16
+  IPv4_SERVICE_CIDR: 10.153.183.0/24
+  IPv6_SUPPORT: true
+  IPv6_CLUSTER_CIDR: fd02::/64
+  IPv6_SERVICE_CIDR: fd99::/108
+extraSANs:
+  - 10.153.183.1"""
+            lc_config_dir = "/var/snap/microk8s/common/"
+            if not os.path.exists(lc_config_dir):
+                os.makedirs(lc_config_dir)
+
+            file_path = os.path.join(lc_config_dir, ".microk8s.yaml")
+            with open(file_path, "w") as file:
+                file.write(launch_config)
 
         cmd = "sudo snap install microk8s --classic --channel={}".format(upgrade_from)
         run_until_success(cmd)
         wait_for_installation()
-        if is_container():
-            # In some setups (eg LXC on GCE) the hashsize nf_conntrack file under
-            # sys is marked as rw but any update on it is failing causing kube-proxy
-            # to fail.
-            here = os.path.dirname(os.path.abspath(__file__))
-            apply_patch = os.path.join(here, "patch-kube-proxy.sh")
-            check_call("sudo {}".format(apply_patch).split())
+
+        if is_ipv6_configured:
+            kubectl("set env daemonset/calico-node -n kube-system IP=10.3.0.0/16 IP6=fd02::/64")
 
         # Run through the validators and
         # select those that were valid for the original snap
@@ -82,14 +99,6 @@ class TestUpgrade(object):
             print("Will not test ingress")
 
         try:
-            enable = microk8s_enable("gpu")
-            assert "Nothing to do for" not in enable
-            validate_gpu()
-            test_matrix["gpu"] = validate_gpu
-        except CalledProcessError:
-            print("Will not test gpu")
-
-        try:
             enable = microk8s_enable("registry")
             assert "Nothing to do for" not in enable
             validate_registry()
@@ -113,54 +122,6 @@ class TestUpgrade(object):
 
         # AMD64 only tests
         if platform.machine() == "x86_64" and under_time_pressure == "False":
-            """
-            # Prometheus operator on our lxc is chashlooping disabling the test for now.
-            try:
-                enable = microk8s_enable("prometheus", timeout_insec=30)
-                assert "Nothing to do for" not in enable
-                validate_prometheus()
-                test_matrix['prometheus'] = validate_prometheus
-            except:
-                print('Will not test the prometheus')
-
-            # The kubeflow deployment is huge. It will not fit comfortably
-            # with the rest of the addons on the same machine during an upgrade
-            # we will need to find another way to test it.
-            try:
-                enable = microk8s_enable("kubeflow", timeout_insec=30)
-                assert "Nothing to do for" not in enable
-                validate_kubeflow()
-                test_matrix['kubeflow'] = validate_kubeflow
-            except:
-                print('Will not test kubeflow')
-            """
-
-            try:
-                enable = microk8s_enable("fluentd", timeout_insec=30)
-                assert "Nothing to do for" not in enable
-                validate_fluentd()
-                test_matrix["fluentd"] = validate_fluentd
-            except CalledProcessError:
-                print("Will not test the fluentd")
-
-            try:
-                enable = microk8s_enable("jaeger", timeout_insec=30)
-                assert "Nothing to do for" not in enable
-                validate_jaeger()
-                test_matrix["jaeger"] = validate_jaeger
-            except CalledProcessError:
-                print("Will not test the jaeger addon")
-
-            # We are not testing cilium because we want to test the upgrade of the default CNI
-            """
-            try:
-                enable = microk8s_enable("cilium", timeout_insec=300)
-                assert "Nothing to do for" not in enable
-                validate_cilium()
-                test_matrix['cilium'] = validate_cilium
-            except CalledProcessError:
-                print('Will not test the cilium addon')
-            """
             try:
                 ip_ranges = (
                     "192.168.0.105-192.168.0.105,192.168.0.110-192.168.0.111,192.168.1.240/28"
@@ -172,18 +133,12 @@ class TestUpgrade(object):
             except CalledProcessError:
                 print("Will not test the metallb addon")
 
-            # We will not be testing multus because it takes too long for cilium and multus
-            # to settle after the update and the multus test needs to be refactored so we do
-            # delete and recreate the networks configured.
-            """
-            try:
-                enable = microk8s_enable("multus", timeout_insec=150)
-                assert "Nothing to do for" not in enable
-                validate_multus()
-                test_matrix['multus'] = validate_multus
-            except CalledProcessError:
-                print('Will not test the multus addon')
-            """
+            if is_ipv6_configured:
+                try:
+                    validate_dual_stack()
+                    test_matrix["dual_stack"] = validate_dual_stack
+                except CalledProcessError:
+                    print("Will not test the dual stack configuration")
 
         # Refresh the snap to the target
         if upgrade_to.endswith(".snap"):
@@ -203,3 +158,5 @@ class TestUpgrade(object):
         if not is_container():
             # On lxc umount docker overlay is not permitted.
             check_call("sudo snap remove microk8s".split())
+            coredns_procs = _get_process("coredns")
+            assert len(coredns_procs) == 0, "Expected to have 0 coredns processes running."

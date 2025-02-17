@@ -89,7 +89,7 @@ Options:
   --help  Show this message and exit.
 
 Commands:
-  install         Installs MicroK8s. Use --cpu, --mem, --disk and --channel to configure your setup.
+  install         Installs MicroK8s. Use --cpu, --mem, --disk, --channel, and --image to configure your setup.
   uninstall       Removes MicroK8s"""
     click.echo(msg)
     commands = _get_microk8s_commands()
@@ -104,34 +104,60 @@ Commands:
 
 
 def _show_install_help():
-    msg = """Usage: microk8s install OPTIONS
+    msg = f"""Usage: microk8s install OPTIONS
 
     Options:
       --help     Show this message and exit.
-      --cpu      Cores used by MicroK8s (default={})
-      --mem      RAM in GB used by MicroK8s (default={})
-      --disk     Max volume in GB of the dynamically expandable hard disk to be used (default={})
-      --channel  Kubernetes version to install (default={})
-       -y, --assume-yes  Automatic yes to prompts"""
-    Echo.info(
-        msg.format(
-            definitions.DEFAULT_CORES,
-            definitions.DEFAULT_MEMORY,
-            definitions.DEFAULT_DISK,
-            definitions.DEFAULT_CHANNEL,
-        )
-    )
+      --cpu      Cores used by MicroK8s (default={definitions.DEFAULT_CORES}, min={definitions.MIN_CORES})
+      --mem      RAM in GB used by MicroK8s (default={definitions.DEFAULT_MEMORY_GB}, min={definitions.MIN_MEMORY_GB})
+      --disk     Max volume in GB of the dynamically expandable hard disk to be used (default={definitions.DEFAULT_DISK_GB}, min={definitions.MIN_DISK_GB})
+      --channel  Kubernetes version to install (default={definitions.DEFAULT_CHANNEL})
+      --image    Ubuntu version to install (default={definitions.DEFAULT_IMAGE})
+      -y, --assume-yes  Automatic yes to prompts"""  # noqa
+    Echo.info(msg)
+
+
+def memory(mem_gb: str) -> int:
+    """
+    Validates the value in --mem parameter of the install command.
+    """
+    mem_gb = int(mem_gb)
+    if mem_gb < definitions.MIN_MEMORY_GB:
+        raise ValueError("Out of valid memory range")
+    return mem_gb
+
+
+def cpu(cpus: str) -> int:
+    """
+    Validates the value in --cpu parameter of the install command.
+    """
+    cpus = int(cpus)
+    if cpus < definitions.MIN_CORES:
+        raise ValueError("Invalid number of cpus")
+    return cpus
+
+
+def disk(disk_gb: str) -> int:
+    """
+    Validates the value in --disk parameter of the install command.
+    """
+    disk_gb = int(disk_gb)
+    if disk_gb < definitions.MIN_DISK_GB:
+        raise ValueError("Out of valid disk range")
+    return disk_gb
 
 
 def install(args) -> None:
     if "--help" in args or "-h" in args:
         _show_install_help()
         return
+
     parser = argparse.ArgumentParser("microk8s install")
-    parser.add_argument("--cpu", default=definitions.DEFAULT_CORES, type=int)
-    parser.add_argument("--mem", default=definitions.DEFAULT_MEMORY, type=int)
-    parser.add_argument("--disk", default=definitions.DEFAULT_DISK, type=int)
+    parser.add_argument("--cpu", default=definitions.DEFAULT_CORES, type=cpu)
+    parser.add_argument("--mem", default=definitions.DEFAULT_MEMORY_GB, type=memory)
+    parser.add_argument("--disk", default=definitions.DEFAULT_DISK_GB, type=disk)
     parser.add_argument("--channel", default=definitions.DEFAULT_CHANNEL, type=str)
+    parser.add_argument("--image", default=definitions.DEFAULT_IMAGE, type=str)
     parser.add_argument(
         "-y", "--assume-yes", action="store_true", default=definitions.DEFAULT_ASSUME
     )
@@ -140,19 +166,20 @@ def install(args) -> None:
     echo = Echo()
 
     if platform == "win32":
-        aux = Windows(args)
-        if not aux.is_enough_space():
-            echo.warning("VM disk size requested exceeds free space on host.")
-
-    if platform == "darwin":
-        aux = MacOS(args)
-        if not aux.is_enough_space():
-            echo.warning("VM disk size requested exceeds free space on host.")
-
+        host = Windows(args)
+    elif platform == "darwin":
+        host = MacOS(args)
     else:
-        aux = Linux(args)
-        if not aux.is_enough_space():
-            echo.warning("VM disk size requested exceeds free space on host.")
+        host = Linux(args)
+
+    if not host.has_enough_cpus():
+        echo.error("VM cpus requested exceed number of available cores on host.")
+        exit(1)
+    if not host.has_enough_memory():
+        echo.warning("VM memory requested exceeds the total memory on host.")
+        exit(1)
+    if not host.has_enough_disk_space():
+        echo.warning("VM disk size requested exceeds free space on host.")
 
     vm_provider_name: str = "multipass"
     vm_provider_class = get_provider_for(vm_provider_name)
@@ -280,26 +307,12 @@ def dashboard_proxy() -> None:
             ]
             instance.run(command, hide_output=True)
 
-        command = ["microk8s.kubectl", "-n", "kube-system", "get", "secret"]
-        output = instance.run(command, hide_output=True)
-        secret_name = None
-        for line in output.split(b"\n"):
-            if line.startswith(b"default-token"):
-                secret_name = line.split()[0].decode()
-                break
-
-        if not secret_name:
-            echo.error("Cannot find the dashboard secret.")
-
-        command = ["microk8s.kubectl", "-n", "kube-system", "describe", "secret", secret_name]
-        output = instance.run(command, hide_output=True)
-        token = None
-        for line in output.split(b"\n"):
-            if line.startswith(b"token:"):
-                token = line.split()[1].decode()
+        command = ["microk8s.kubectl", "-n", "kube-system", "create", "token", "default"]
+        token = instance.run(command, hide_output=True).decode().strip()
 
         if not token:
-            echo.error("Cannot find token from secret.")
+            echo.error("Could not generate secret token to access dashboard.")
+            exit(1)
 
         ip = instance.get_instance_info().ipv4[0]
 

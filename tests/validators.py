@@ -5,16 +5,17 @@ import requests
 import platform
 import yaml
 import subprocess
+from pathlib import Path
 
 from utils import (
+    get_arch,
     kubectl,
     wait_for_pod_state,
-    kubectl_get,
-    wait_for_installation,
     docker,
     update_yaml_with_arch,
-    run_until_success,
 )
+
+TEMPLATES = Path(__file__).absolute().parent / "templates"
 
 
 def validate_dns_dashboard():
@@ -42,36 +43,22 @@ def validate_dns_dashboard():
     assert attempt > 0
 
 
-def validate_dashboard_ingress():
-    """
-    Validate the ingress for dashboard addon by trying to access the kubernetes dashboard
-    using ingress ports. The dashboard will return HTTP 200 and HTML indicating that it is
-    up and running.
-    """
-    service_ok = False
-    attempt = 50
-    while attempt >= 0:
-        try:
-            resp = requests.get(
-                "https://kubernetes-dashboard.127.0.0.1.nip.io/#/login", verify=False
-            )
-            if resp.status_code == 200 and "Kubernetes Dashboard" in resp.content.decode("utf-8"):
-                service_ok = True
-                break
-        except requests.RequestException:
-            time.sleep(5)
-            attempt -= 1
-
-    assert service_ok
-
-
 def validate_storage():
     """
     Validate storage by creating a PVC.
     """
+    output = kubectl("describe deployment hostpath-provisioner -n kube-system")
+    if "hostpath-provisioner-{}:1.0.0".format(get_arch()) in output:
+        # we are running with a hostpath-provisioner that is old and we need to patch it
+        cmd = (
+            "set image  deployment hostpath-provisioner"
+            "-n kube-system"
+            "hostpath-provisioner=cdkbot/hostpath-provisioner:1.1.0"
+        )
+        kubectl(cmd)
+
     wait_for_pod_state("", "kube-system", "running", label="k8s-app=hostpath-provisioner")
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "pvc.yaml")
+    manifest = TEMPLATES / "pvc.yaml"
     kubectl("apply -f {}".format(manifest))
     wait_for_pod_state("hostpath-test-pod", "default", "running")
 
@@ -135,134 +122,13 @@ def validate_ingress():
     else:
         wait_for_pod_state("", "ingress", "running", label="name=nginx-ingress-microk8s")
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "ingress.yaml")
+    manifest = TEMPLATES / "ingress.yaml"
     update_yaml_with_arch(manifest)
     kubectl("apply -f {}".format(manifest))
     wait_for_pod_state("", "default", "running", label="app=microbot")
 
     common_ingress()
 
-    kubectl("delete -f {}".format(manifest))
-
-
-def validate_ambassador():
-    """
-    Validate the Ambassador API Gateway by creating a ingress rule.
-    """
-
-    if platform.machine() != "x86_64":
-        print("Ambassador tests are only relevant in x86 architectures")
-        return
-
-    wait_for_pod_state("", "ambassador", "running", label="product=aes")
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "ingress.yaml")
-    update_yaml_with_arch(manifest)
-    kubectl("apply -f {}".format(manifest))
-    wait_for_pod_state("", "default", "running", label="app=microbot")
-
-    # `Ingress`es must be annotatated for being recognized by Ambassador
-    kubectl("annotate ingress microbot-ingress-nip kubernetes.io/ingress.class=ambassador")
-
-    common_ingress()
-
-    kubectl("delete -f {}".format(manifest))
-
-
-def validate_gpu():
-    """
-    Validate gpu by trying a cuda-add.
-    """
-    if platform.machine() != "x86_64":
-        print("GPU tests are only relevant in x86 architectures")
-        return
-
-    wait_for_pod_state(
-        "", "gpu-operator-resources", "running", label="app=nvidia-device-plugin-daemonset"
-    )
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "cuda-add.yaml")
-
-    get_pod = kubectl_get("po")
-    if "cuda-vector-add" in str(get_pod):
-        # Cleanup
-        kubectl("delete -f {}".format(manifest))
-        time.sleep(10)
-
-    kubectl("apply -f {}".format(manifest))
-    wait_for_pod_state("cuda-vector-add", "default", "terminated")
-    result = kubectl("logs pod/cuda-vector-add")
-    assert "PASSED" in result
-
-
-def validate_inaccel():
-    """
-    Validate inaccel by trying a vadd.
-    """
-    if platform.machine() != "x86_64":
-        print("FPGA tests are only relevant in x86 architectures")
-        return
-
-    wait_for_pod_state("", "kube-system", "running", label="app.kubernetes.io/name=fpga-operator")
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "inaccel.yaml")
-
-    get_pod = kubectl_get("po")
-    if "inaccel-vadd" in str(get_pod):
-        # Cleanup
-        kubectl("delete -f {}".format(manifest))
-        time.sleep(10)
-
-    kubectl("apply -f {}".format(manifest))
-    wait_for_pod_state("inaccel-vadd", "default", "terminated")
-    result = kubectl("logs pod/inaccel-vadd")
-    assert "PASSED" in result
-
-
-def validate_istio():
-    """
-    Validate istio by deploying the bookinfo app.
-    """
-    if platform.machine() != "x86_64":
-        print("Istio tests are only relevant in x86 architectures")
-        return
-
-    wait_for_installation()
-    istio_services = [
-        "pilot",
-        "egressgateway",
-        "ingressgateway",
-    ]
-    for service in istio_services:
-        wait_for_pod_state("", "istio-system", "running", label="istio={}".format(service))
-
-    cmd = "/snap/bin/microk8s.istioctl verify-install"
-    return run_until_success(cmd, timeout_insec=900, err_out="no")
-
-
-def validate_knative():
-    """
-    Validate Knative by deploying the helloworld-go app.
-    """
-    if platform.machine() != "x86_64":
-        print("Knative tests are only relevant in x86 architectures")
-        return
-
-    wait_for_installation()
-    knative_services = [
-        "activator",
-        "autoscaler",
-        "controller",
-    ]
-    for service in knative_services:
-        wait_for_pod_state("", "knative-serving", "running", label="app={}".format(service))
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "knative-helloworld.yaml")
-    kubectl("apply -f {}".format(manifest))
-    wait_for_pod_state("", "default", "running", label="serving.knative.dev/service=helloworld-go")
     kubectl("delete -f {}".format(manifest))
 
 
@@ -280,8 +146,7 @@ def validate_registry():
     docker("tag busybox localhost:32000/my-busybox")
     docker("push localhost:32000/my-busybox")
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "bbox-local.yaml")
+    manifest = TEMPLATES / "bbox-local.yaml"
     kubectl("apply -f {}".format(manifest))
     wait_for_pod_state("busybox", "default", "running")
     output = kubectl("describe po busybox")
@@ -293,8 +158,7 @@ def validate_forward():
     """
     Validate ports are forwarded
     """
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "nginx-pod.yaml")
+    manifest = TEMPLATES / "nginx-pod.yaml"
     kubectl("apply -f {}".format(manifest))
     wait_for_pod_state("", "default", "running", label="app=nginx")
     os.system("killall kubectl")
@@ -311,6 +175,7 @@ def validate_forward():
         time.sleep(2)
 
     assert resp.status_code == 200
+    os.system("killall kubectl")
 
 
 def validate_metrics_server():
@@ -332,161 +197,6 @@ def validate_metrics_server():
     assert attempt > 0
 
 
-def validate_prometheus():
-    """
-    Validate the prometheus operator
-    """
-    if platform.machine() != "x86_64":
-        print("Prometheus tests are only relevant in x86 architectures")
-        return
-
-    wait_for_pod_state("prometheus-k8s-0", "monitoring", "running", timeout_insec=1200)
-    wait_for_pod_state("alertmanager-main-0", "monitoring", "running", timeout_insec=1200)
-
-
-def validate_fluentd():
-    """
-    Validate fluentd
-    """
-    if platform.machine() != "x86_64":
-        print("Fluentd tests are only relevant in x86 architectures")
-        return
-
-    wait_for_pod_state("elasticsearch-logging-0", "kube-system", "running")
-    wait_for_pod_state("", "kube-system", "running", label="k8s-app=fluentd-es")
-    wait_for_pod_state("", "kube-system", "running", label="k8s-app=kibana-logging")
-
-
-def validate_jaeger():
-    """
-    Validate the jaeger operator
-    """
-    if platform.machine() != "x86_64":
-        print("Jaeger tests are only relevant in x86 architectures")
-        return
-
-    wait_for_pod_state("", "default", "running", label="name=jaeger-operator")
-    attempt = 30
-    while attempt > 0:
-        try:
-            output = kubectl("get ingress")
-            if "simplest-query" in output:
-                break
-        except subprocess.CalledProcessError:
-            pass
-        time.sleep(2)
-        attempt -= 1
-
-    assert attempt > 0
-
-
-def validate_linkerd():
-    """
-    Validate Linkerd by deploying emojivoto.
-    """
-    if platform.machine() != "x86_64":
-        print("Linkerd tests are only relevant in x86 architectures")
-        return
-
-    wait_for_installation()
-    wait_for_pod_state(
-        "",
-        "linkerd",
-        "running",
-        label="linkerd.io/control-plane-component=controller",
-        timeout_insec=300,
-    )
-    print("Linkerd controller up and running.")
-    wait_for_pod_state(
-        "",
-        "linkerd",
-        "running",
-        label="linkerd.io/control-plane-component=proxy-injector",
-        timeout_insec=300,
-    )
-    print("Linkerd proxy injector up and running.")
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "emojivoto.yaml")
-    kubectl("apply -f {}".format(manifest))
-    wait_for_pod_state("", "emojivoto", "running", label="app=emoji-svc", timeout_insec=600)
-    kubectl("delete -f {}".format(manifest))
-
-
-def validate_rbac():
-    """
-    Validate RBAC is actually on
-    """
-    output = kubectl("auth can-i --as=system:serviceaccount:default:default view pod", err_out="no")
-    assert "no" in output
-    output = kubectl("auth can-i --as=admin --as-group=system:masters view pod")
-    assert "yes" in output
-
-
-def cilium(cmd, timeout_insec=300, err_out=None):
-    """
-    Do a cilium <cmd>
-    Args:
-        cmd: left part of cilium <left_part> command
-        timeout_insec: timeout for this job
-        err_out: If command fails and this is the output, return.
-
-    Returns: the cilium response in a string
-    """
-    cmd = "/snap/bin/microk8s.cilium " + cmd
-    return run_until_success(cmd, timeout_insec, err_out)
-
-
-def validate_cilium():
-    """
-    Validate cilium by deploying the bookinfo app.
-    """
-    if platform.machine() != "x86_64":
-        print("Cilium tests are only relevant in x86 architectures")
-        return
-
-    wait_for_installation()
-    wait_for_pod_state("", "kube-system", "running", label="k8s-app=cilium")
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "nginx-pod.yaml")
-
-    # Try up to three times to get nginx under cilium
-    for attempt in range(0, 10):
-        kubectl("apply -f {}".format(manifest))
-        wait_for_pod_state("", "default", "running", label="app=nginx")
-        output = cilium("endpoint list -o json", timeout_insec=20)
-        if "nginx" in output:
-            kubectl("delete -f {}".format(manifest))
-            break
-        else:
-            print("Cilium not ready will retry testing.")
-            kubectl("delete -f {}".format(manifest))
-            time.sleep(20)
-    else:
-        print("Cilium testing failed.")
-        assert False
-
-
-def validate_multus():
-    """
-    Validate multus by making sure the multus pod is running.
-    """
-
-    wait_for_installation()
-    wait_for_pod_state("", "kube-system", "running", label="app=multus")
-
-
-def validate_kubeflow():
-    """
-    Validate kubeflow
-    """
-    if platform.machine() != "x86_64":
-        print("Kubeflow tests are only relevant in x86 architectures")
-        return
-
-    wait_for_pod_state("ambassador-operator-0", "kubeflow", "running")
-
-
 def validate_metallb_config(ip_ranges="192.168.0.105"):
     """
     Validate Metallb
@@ -494,89 +204,40 @@ def validate_metallb_config(ip_ranges="192.168.0.105"):
     if platform.machine() != "x86_64":
         print("Metallb tests are only relevant in x86 architectures")
         return
-    out = kubectl("get configmap config -n metallb-system -o jsonpath='{.data.config}'")
+    out = kubectl(
+        "get ipaddresspool -n metallb-system default-addresspool -o jsonpath='{.spec.addresses}"
+    )
     for ip_range in ip_ranges.split(","):
         assert ip_range in out
 
 
-def validate_coredns_config(ip_ranges="8.8.8.8,1.1.1.1"):
-    """
-    Validate dns
-    """
-    out = kubectl("get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}'")
-    expected_forward_val = "forward ."
-    for ip_range in ip_ranges.split(","):
-        expected_forward_val = expected_forward_val + " " + ip_range
-    assert expected_forward_val in out
-
-
-def validate_keda():
-    """
-    Validate keda
-    """
-    wait_for_installation()
-    wait_for_pod_state("", "keda", "running", label="app=keda-operator")
-    print("KEDA operator up and running.")
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "keda-scaledobject.yaml")
+def validate_dual_stack():
+    # Deploy the test deployment and service
+    manifest = TEMPLATES / "dual-stack.yaml"
     kubectl("apply -f {}".format(manifest))
-    scaledObject = kubectl("-n gonuts get scaledobject.keda.sh")
-    assert "stan-scaledobject" in scaledObject
-    kubectl("delete -f {}".format(manifest))
 
+    wait_for_pod_state("", "default", "running", label="run=nginxdualstack")
 
-def validate_traefik():
-    """
-    Validate traefik
-    """
-    wait_for_pod_state("", "traefik", "running", label="name=traefik-ingress-lb")
-
-
-def validate_portainer():
-    """
-    Validate portainer
-    """
-    wait_for_pod_state("", "portainer", "running", label="app.kubernetes.io/name=portainer")
-
-
-def validate_openfaas():
-    """
-    Validate openfaas
-    """
-    wait_for_pod_state("", "openfaas", "running", label="app=gateway")
-
-
-def validate_openebs():
-    """
-    Validate OpenEBS
-    """
-    wait_for_installation()
-    wait_for_pod_state(
-        "",
-        "openebs",
-        "running",
-        label="openebs.io/component-name=ndm",
-        timeout_insec=900,
+    ipv6_endpoint = kubectl(
+        "get endpoints nginx6 "
+        "-o jsonpath={.subsets[0].addresses[0].ip} "
+        "--output=jsonpath=[{.subsets[0].addresses[0].ip}]"
     )
-    print("OpenEBS is up and running.")
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "openebs-test.yaml")
-    kubectl("apply -f {}".format(manifest))
-    wait_for_pod_state(
-        "", "default", "running", label="app=openebs-test-busybox", timeout_insec=900
-    )
-    output = kubectl("exec openebs-test-busybox -- ls /", timeout_insec=900, err_out="no")
-    assert "my-data" in output
-    kubectl("delete -f {}".format(manifest))
 
+    print("Pinging endpoint: http://{}/".format(ipv6_endpoint))
+    url = f"http://{ipv6_endpoint}/"
+    attempt = 10
+    service_ok = False
+    while attempt >= 0:
+        try:
+            resp = requests.get(url)
+            if "Kubernetes IPv6 nginx" in str(resp.content):
+                print(resp.content)
+                service_ok = True
+                break
+        except requests.RequestException:
+            time.sleep(5)
+            attempt -= 1
 
-def validate_kata():
-    """
-    Validate Kata
-    """
-    wait_for_installation()
-    here = os.path.dirname(os.path.abspath(__file__))
-    manifest = os.path.join(here, "templates", "nginx-kata.yaml")
-    kubectl("apply -f {}".format(manifest))
-    wait_for_pod_state("", "default", "running", label="app=kata")
+    assert service_ok
     kubectl("delete -f {}".format(manifest))

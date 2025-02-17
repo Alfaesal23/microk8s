@@ -1,23 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -eu
 
-export PATH="$SNAP/usr/sbin:$SNAP/usr/bin:$SNAP/sbin:$SNAP/bin:$PATH"
-ARCH="$($SNAP/bin/uname -m)"
-export LD_LIBRARY_PATH="$SNAP/lib:$SNAP/usr/lib:$SNAP/lib/$ARCH-linux-gnu:$SNAP/usr/lib/$ARCH-linux-gnu"
-export SNAP_NAME
-export PYTHONNOUSERSITE=false
-
 source $SNAP/actions/common/utils.sh
 
+use_snap_env
+
 exit_if_stopped
+exit_if_not_root
 exit_if_no_permissions
 
-if ! [ -e ${SNAP_DATA}/var/lock/clustered.lock ] &&
-   ! [ -e ${SNAP_DATA}/args/k8s-dqlite ]
+if ! [ -e ${SNAP_DATA}/var/lock/no-cert-reissue ] ||
+   [[ ! -e ${SNAP_DATA}/var/lock/clustered.lock &&
+      ! -e ${SNAP_DATA}/args/k8s-dqlite ]]
 then
   echo "This MicroK8s deployment is not acting as a node in a cluster."
   exit 1
 fi
 
-run_with_sudo preserve_env ${SNAP}/usr/bin/python3 ${SNAP}/scripts/cluster/leave.py $@
+run_with_sudo preserve_env ${SNAP}/usr/bin/python3 ${SNAP}/scripts/wrappers/leave.py "${@}"

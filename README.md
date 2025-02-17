@@ -1,6 +1,8 @@
-# MicroK8s
+<img src="docs/images/MicroK8s-logo-RGB-2022.png" width="400px;" />
 
-![](https://img.shields.io/badge/Kubernetes-1.22-326de6.svg)
+[![](https://github.com/canonical/microk8s/actions/workflows/build-snap.yml/badge.svg)](https://github.com/canonical/microk8s/actions/workflows/build-snap.yml)
+[![](https://snapcraft.io/microk8s/badge.svg)](https://snapcraft.io/microk8s)
+![](https://img.shields.io/badge/Kubernetes-1.30-326de6.svg)
 
 <img src="/docs/images/certified_kubernetes_color-222x300.png" align="right" width="200px">
 
@@ -42,7 +44,6 @@ flavours of Linux](https://snapcraft.io/microk8s). Perfect for:
   - Ingress, DNS, Dashboard, Clustering
   - Automatic updates to the latest Kubernetes version
   - GPGPU bindings for AI/ML
-  - Kubeflow!
 
 Drop us a line at [MicroK8s in the Wild](docs/community.md) if you are
 doing something fun with MicroK8s!
@@ -81,7 +82,8 @@ sudo usermod -a -G microk8s <username>
 MicroK8s installs a barebones upstream Kubernetes. Additional services like dns and the Kubernetes dashboard can be enabled using the `microk8s enable` command.
 
 ```
-sudo microk8s enable dns dashboard
+sudo microk8s enable dns
+sudo microk8s enable dashboard
 ```
 
 Use `microk8s status` to see a list of enabled and available addons. You can find the addon manifests and/or scripts under `${SNAP}/actions/`, with `${SNAP}` pointing by default to `/snap/microk8s/current`.
@@ -97,3 +99,7 @@ contribute to MicroK8s.
 <a href="https://snapcraft.io/microk8s" title="Get it from the Snap Store">
             <img src="https://snapcraft.io/static/images/badges/en/snap-store-white.svg" alt="Get it from the Snap Store" width="200" />
           </a>
+
+<a href="https://github.com/canonical/microk8s/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=canonical/microk8s" />
+</a>

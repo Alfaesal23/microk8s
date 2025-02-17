@@ -5,3 +5,8 @@ pytest
 pytest-xdist
 pyyaml
 sh
+jsonschema==4.0.0
+pdbpp
+psutil
+netifaces
+requests

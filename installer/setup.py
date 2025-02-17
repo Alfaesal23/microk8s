@@ -3,7 +3,7 @@ from setuptools import setup
 setup(
     name="microk8s",
     version="1.0.2",
-    url="https://github.com/ubuntu/microk8s",
+    url="https://github.com/canonical/microk8s",
     license="Apache-2.0",
     author="Joe Borg",
     author_email="joseph.borg@canonical.com",
@@ -12,11 +12,11 @@ setup(
     install_requires=[
         "click~=7.0",
         "progressbar33==2.4",
-        "requests==2.25.1",
+        "requests==2.32.2",
         "requests_unixsocket==0.1.5",
         "simplejson==3.8.2",
         "toml==0.10.0",
-        "urllib3==1.26.5",
+        "urllib3==1.26.19",
     ],
     platforms="any",
     entry_points={
